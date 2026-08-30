@@ -7,6 +7,11 @@ const {
     Partials,
     EmbedBuilder,
     SlashCommandBuilder,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    AttachmentBuilder,
+    ChannelType,
     MessageFlags,
     PermissionFlagsBits,
     REST,
@@ -15,74 +20,92 @@ const {
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID; // optional - makes slash commands appear instantly
+const GUILD_ID = process.env.GUILD_ID;
 
-// How many emoji/role pairs one message can hold.
 const MAX_PAIRS = 5;
-
-// ================================
-// STARTUP CHECKS
-// ================================
 
 console.log("TOKEN:", TOKEN ? `found, ${TOKEN.length} chars` : "MISSING");
 console.log("CLIENT_ID:", CLIENT_ID ? `found, ${CLIENT_ID}` : "MISSING");
 console.log("GUILD_ID:", GUILD_ID ? `found, ${GUILD_ID}` : "not set (using global commands)");
 
 if (!TOKEN) {
-    console.error("DISCORD_TOKEN is not set. Check the Startup page in your panel.");
+    console.error("DISCORD_TOKEN is not set.");
     process.exit(1);
 }
 
 if (!CLIENT_ID) {
-    console.error("CLIENT_ID is not set. Check the Startup page in your panel.");
+    console.error("CLIENT_ID is not set.");
     process.exit(1);
 }
 
 // ================================
-// PERSISTENCE
+// WHERE DATA IS SAVED
 // ================================
+// If you attached a Railway volume at /data it is used automatically.
+// Otherwise files sit next to the code and are lost on redeploy.
 
-const DATA_FILE = path.join(process.cwd(), "reaction-roles.json");
+const DATA_DIR = fs.existsSync("/data") ? "/data" : process.cwd();
 
-// key = "messageId:emojiKey"  ->  value = roleId
-let reactionRoles = new Map();
+console.log("Saving data in:", DATA_DIR);
 
-function loadData() {
+const ROLES_FILE = path.join(DATA_DIR, "reaction-roles.json");
+const TICKETS_FILE = path.join(DATA_DIR, "tickets.json");
+
+function readJson(file, fallback) {
     try {
-        if (!fs.existsSync(DATA_FILE)) {
-            console.log("No saved data file yet - starting fresh.");
-            return;
-        }
-
-        const raw = fs.readFileSync(DATA_FILE, "utf8");
-        const parsed = JSON.parse(raw);
-
-        reactionRoles = new Map(Object.entries(parsed));
-
-        console.log(`Loaded ${reactionRoles.size} saved reaction role(s).`);
+        if (!fs.existsSync(file)) return fallback;
+        return JSON.parse(fs.readFileSync(file, "utf8"));
     } catch (error) {
-        console.error("Could not load saved data, starting fresh:", error.message);
-        reactionRoles = new Map();
+        console.error(`Could not read ${file}:`, error.message);
+        return fallback;
     }
 }
 
-function saveData() {
+function writeJson(file, data) {
     try {
-        const asObject = Object.fromEntries(reactionRoles);
-        fs.writeFileSync(DATA_FILE, JSON.stringify(asObject, null, 2), "utf8");
+        fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
     } catch (error) {
-        console.error("Could not save data:", error.message);
+        console.error(`Could not write ${file}:`, error.message);
     }
 }
 
-loadData();
+// ---------- reaction roles ----------
+
+let reactionRoles = new Map(Object.entries(readJson(ROLES_FILE, {})));
+
+console.log(`Loaded ${reactionRoles.size} saved reaction role(s).`);
+
+function saveRoles() {
+    writeJson(ROLES_FILE, Object.fromEntries(reactionRoles));
+}
+
+// ---------- tickets ----------
+// { config: { supportRoleId, logChannelId, categoryId }, counter: 0, open: { channelId: {...} } }
+
+let ticketData = readJson(TICKETS_FILE, { config: {}, panels: {}, counter: 0, open: {} });
+
+if (!ticketData.config) ticketData.config = {};
+if (!ticketData.panels) ticketData.panels = {};
+if (!ticketData.counter) ticketData.counter = 0;
+if (!ticketData.open) ticketData.open = {};
+
+// Friendly names for the game codes used in channel names.
+const GAMES = {
+    ow: "Overwatch",
+    lol: "League of Legends",
+    wow: "World of Warcraft"
+};
+
+console.log(`Ticket system: ${Object.keys(ticketData.open).length} open ticket(s), ${ticketData.counter} created all time.`);
+
+function saveTickets() {
+    writeJson(TICKETS_FILE, ticketData);
+}
 
 // ================================
-// EMOJI KEY HELPERS
+// EMOJI HELPERS
 // ================================
 
-// Custom emoji "<:name:12345>" -> "12345"
-// Unicode emoji "*"            -> the emoji itself
 function keyFromInput(input) {
     const custom = input.match(/<a?:\w+:(\d+)>/);
     return custom ? custom[1] : input.trim();
@@ -104,7 +127,8 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.GuildMessageReactions
+        GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.MessageContent
     ],
     partials: [
         Partials.Message,
@@ -114,84 +138,94 @@ const client = new Client({
 });
 
 // ================================
-// BOT READY
+// READY
 // ================================
 
 client.once("clientReady", async () => {
     console.log(`Logged in as ${client.user.tag}`);
 
     client.user.setPresence({
-        activities: [{ name: "Reaction Roles", type: 0 }],
+        activities: [{ name: "Reaction Roles & Tickets", type: 0 }],
         status: "online"
     });
 
     const reactionRoleCommand = new SlashCommandBuilder()
         .setName("reactionrole")
         .setDescription("Create a reaction role message with up to 5 roles")
-        .addStringOption(option =>
-            option
-                .setName("emoji")
-                .setDescription("Emoji for the first role")
-                .setRequired(true)
-        )
-        .addRoleOption(option =>
-            option
-                .setName("role")
-                .setDescription("First role to give")
-                .setRequired(true)
-        )
-        .addStringOption(option =>
-            option
-                .setName("title")
-                .setDescription("Title of the message")
-                .setRequired(false)
-        )
-        .addStringOption(option =>
-            option
-                .setName("description")
-                .setDescription("Description of the message")
-                .setRequired(false)
-        );
+        .addStringOption(o => o.setName("emoji").setDescription("Emoji for the first role").setRequired(true))
+        .addRoleOption(o => o.setName("role").setDescription("First role to give").setRequired(true))
+        .addStringOption(o => o.setName("title").setDescription("Title of the message").setRequired(false))
+        .addStringOption(o => o.setName("description").setDescription("Description of the message").setRequired(false));
 
-    // Adds emoji2/role2 through emoji5/role5 as optional extras.
     for (let i = 2; i <= MAX_PAIRS; i++) {
         reactionRoleCommand
-            .addStringOption(option =>
-                option
-                    .setName(`emoji${i}`)
-                    .setDescription(`Emoji for role number ${i}`)
-                    .setRequired(false)
-            )
-            .addRoleOption(option =>
-                option
-                    .setName(`role${i}`)
-                    .setDescription(`Role number ${i}`)
-                    .setRequired(false)
-            );
+            .addStringOption(o => o.setName(`emoji${i}`).setDescription(`Emoji for role number ${i}`).setRequired(false))
+            .addRoleOption(o => o.setName(`role${i}`).setDescription(`Role number ${i}`).setRequired(false));
     }
 
     const commands = [
         reactionRoleCommand,
+
         new SlashCommandBuilder()
             .setName("reactionrole-list")
-            .setDescription("Show all saved reaction role mappings")
-    ].map(command => command.toJSON());
+            .setDescription("Show all saved reaction role mappings"),
+
+        new SlashCommandBuilder()
+            .setName("ticket-setup")
+            .setDescription("Set up the ticket system (do this first)")
+            .addRoleOption(o =>
+                o.setName("support_role")
+                    .setDescription("Role that can see and answer tickets")
+                    .setRequired(true))
+            .addChannelOption(o =>
+                o.setName("log_channel")
+                    .setDescription("Channel where closed ticket transcripts are posted")
+                    .addChannelTypes(ChannelType.GuildText)
+                    .setRequired(true))
+            .addChannelOption(o =>
+                o.setName("category")
+                    .setDescription("Category new ticket channels are created under")
+                    .addChannelTypes(ChannelType.GuildCategory)
+                    .setRequired(false)),
+
+        new SlashCommandBuilder()
+            .setName("ticket-panel")
+            .setDescription("Post a ticket panel for one game")
+            .addStringOption(o =>
+                o.setName("game")
+                    .setDescription("Which game this panel is for")
+                    .setRequired(true)
+                    .addChoices(
+                        { name: "Overwatch", value: "ow" },
+                        { name: "League of Legends", value: "lol" },
+                        { name: "World of Warcraft", value: "wow" }
+                    ))
+            .addChannelOption(o =>
+                o.setName("category")
+                    .setDescription("Category this game's tickets are created under")
+                    .addChannelTypes(ChannelType.GuildCategory)
+                    .setRequired(false))
+            .addRoleOption(o =>
+                o.setName("support_role")
+                    .setDescription("Staff role for this game (defaults to the one from /ticket-setup)")
+                    .setRequired(false))
+            .addStringOption(o => o.setName("title").setDescription("Panel title").setRequired(false))
+            .addStringOption(o => o.setName("description").setDescription("Panel text").setRequired(false)),
+
+        new SlashCommandBuilder()
+            .setName("ticket-close")
+            .setDescription("Close the ticket you are currently in")
+    ].map(c => c.toJSON());
 
     const rest = new REST({ version: "10" }).setToken(TOKEN);
 
     try {
         if (GUILD_ID) {
-            await rest.put(
-                Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-                { body: commands }
-            );
+            await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
             console.log("Slash commands registered for your server (instant).");
         } else {
-            await rest.put(
-                Routes.applicationCommands(CLIENT_ID),
-                { body: commands }
-            );
-            console.log("Slash commands registered globally (can take up to 1 hour to appear).");
+            await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+            console.log("Slash commands registered globally (up to 1 hour).");
         }
     } catch (error) {
         console.error("Failed to register slash commands:", error);
@@ -199,7 +233,7 @@ client.once("clientReady", async () => {
 });
 
 // ================================
-// SHARED REACTION HANDLER
+// REACTION ROLES
 // ================================
 
 async function handleReaction(reaction, user, action) {
@@ -209,15 +243,13 @@ async function handleReaction(reaction, user, action) {
         try {
             await reaction.fetch();
         } catch (error) {
-            console.error("Could not fetch reaction:", error.message);
             return;
         }
     }
 
     if (!reaction.message.guild) return;
 
-    const key = makeKey(reaction.message.id, keyFromReaction(reaction.emoji));
-    const roleId = reactionRoles.get(key);
+    const roleId = reactionRoles.get(makeKey(reaction.message.id, keyFromReaction(reaction.emoji)));
 
     if (!roleId) return;
 
@@ -226,38 +258,341 @@ async function handleReaction(reaction, user, action) {
 
         if (action === "add") {
             await member.roles.add(roleId);
-            console.log(`Gave role ${roleId} to ${user.tag}`);
         } else {
             await member.roles.remove(roleId);
-            console.log(`Removed role ${roleId} from ${user.tag}`);
         }
     } catch (error) {
         console.error(`Couldn't ${action} role:`, error.message);
     }
 }
 
-client.on("messageReactionAdd", (reaction, user) => {
-    handleReaction(reaction, user, "add");
-});
-
-client.on("messageReactionRemove", (reaction, user) => {
-    handleReaction(reaction, user, "remove");
-});
+client.on("messageReactionAdd", (r, u) => handleReaction(r, u, "add"));
+client.on("messageReactionRemove", (r, u) => handleReaction(r, u, "remove"));
 
 // ================================
-// SLASH COMMANDS
+// TRANSCRIPT BUILDER
+// ================================
+
+function escapeHtml(text) {
+    return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+async function buildTranscript(channel, info) {
+    const collected = [];
+    let lastId;
+
+    // Grab up to 1000 messages, oldest first.
+    for (let i = 0; i < 10; i++) {
+        const options = { limit: 100 };
+        if (lastId) options.before = lastId;
+
+        const batch = await channel.messages.fetch(options);
+        if (batch.size === 0) break;
+
+        collected.push(...batch.values());
+        lastId = batch.last().id;
+
+        if (batch.size < 100) break;
+    }
+
+    collected.reverse();
+
+    const rows = collected.map(message => {
+        const time = new Date(message.createdTimestamp).toLocaleString("en-GB");
+        const author = escapeHtml(message.author.tag);
+        const body = escapeHtml(message.content || "");
+
+        const files = message.attachments
+            .map(a => `<div class="file"><a href="${a.url}">${escapeHtml(a.name)}</a></div>`)
+            .join("");
+
+        const embeds = message.embeds.length
+            ? `<div class="embed">[embed] ${escapeHtml(message.embeds[0].title || "")} ${escapeHtml(message.embeds[0].description || "")}</div>`
+            : "";
+
+        return `<div class="msg"><div class="meta"><span class="author">${author}</span><span class="time">${time}</span></div><div class="body">${body}</div>${embeds}${files}</div>`;
+    }).join("\n");
+
+    const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Ticket ${info.number} transcript</title>
+<style>
+body{background:#313338;color:#dbdee1;font-family:'gg sans',Arial,sans-serif;margin:0;padding:24px;}
+h1{color:#fff;font-size:20px;margin:0 0 4px;}
+.header{border-bottom:1px solid #3f4147;padding-bottom:16px;margin-bottom:16px;}
+.header div{font-size:13px;color:#b5bac1;margin-top:2px;}
+.msg{padding:8px 0;border-bottom:1px solid #2b2d31;}
+.meta{font-size:12px;margin-bottom:2px;}
+.author{color:#fff;font-weight:600;margin-right:8px;}
+.time{color:#949ba4;}
+.body{white-space:pre-wrap;word-wrap:break-word;}
+.embed{border-left:3px solid #5865f2;padding-left:8px;margin-top:4px;color:#b5bac1;font-size:14px;}
+.file a{color:#00a8fc;font-size:14px;}
+</style></head><body>
+<div class="header">
+<h1>Ticket #${info.number}</h1>
+<div>Opened by: ${escapeHtml(info.openerTag)}</div>
+<div>Closed by: ${escapeHtml(info.closerTag)}</div>
+<div>Closed at: ${new Date().toLocaleString("en-GB")}</div>
+<div>Messages: ${collected.length}</div>
+</div>
+${rows || "<div class='msg'><div class='body'>No messages.</div></div>"}
+</body></html>`;
+
+    return { html, count: collected.length };
+}
+
+// ================================
+// TICKET ACTIONS
+// ================================
+
+async function createTicket(interaction, game) {
+    const config = ticketData.config;
+    const panel = ticketData.panels[game] || {};
+
+    const supportRoleId = panel.supportRoleId || config.supportRoleId;
+    const categoryId = panel.categoryId || config.categoryId || null;
+
+    if (!supportRoleId || !config.logChannelId) {
+        return interaction.editReply({
+            content: "The ticket system has not been set up yet. An admin needs to run /ticket-setup first."
+        });
+    }
+
+    // One open ticket per person per game.
+    const existing = Object.entries(ticketData.open)
+        .find(([, t]) => t.openerId === interaction.user.id && t.game === game);
+
+    if (existing) {
+        return interaction.editReply({
+            content: `You already have an open ${GAMES[game] || game} ticket: <#${existing[0]}>`
+        });
+    }
+
+    ticketData.counter += 1;
+    const number = String(ticketData.counter).padStart(4, "0");
+
+    // ticket-ow-cianan
+    const safeName = interaction.user.username
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "")
+        .slice(0, 20) || "user";
+
+    const channelName = `ticket-${game}-${safeName}`;
+
+    const overwrites = [
+        {
+            id: interaction.guild.roles.everyone.id,
+            deny: [PermissionFlagsBits.ViewChannel]
+        },
+        {
+            id: interaction.user.id,
+            allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+                PermissionFlagsBits.AttachFiles
+            ]
+        },
+        {
+            id: supportRoleId,
+            allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+                PermissionFlagsBits.AttachFiles
+            ]
+        },
+        {
+            id: client.user.id,
+            allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+                PermissionFlagsBits.ManageChannels,
+                PermissionFlagsBits.AttachFiles
+            ]
+        }
+    ];
+
+    let channel;
+
+    try {
+        channel = await interaction.guild.channels.create({
+            name: channelName,
+            type: ChannelType.GuildText,
+            parent: categoryId,
+            permissionOverwrites: overwrites
+        });
+    } catch (error) {
+        console.error("Could not create ticket channel:", error.message);
+        ticketData.counter -= 1;
+        return interaction.editReply({
+            content: "I couldn't create the channel. I need **Manage Channels** permission, and the category must not be full (50 channel limit)."
+        });
+    }
+
+    ticketData.open[channel.id] = {
+        number,
+        game,
+        supportRoleId,
+        openerId: interaction.user.id,
+        openerTag: interaction.user.tag,
+        createdAt: Date.now(),
+        claimedBy: null
+    };
+
+    saveTickets();
+
+    const embed = new EmbedBuilder()
+        .setTitle(`${GAMES[game] || game} Ticket #${number}`)
+        .setDescription("Support will be with you shortly. Describe your issue below with as much detail as you can.")
+        .addFields(
+            { name: "Opened by", value: `<@${interaction.user.id}>`, inline: true },
+            { name: "Game", value: GAMES[game] || game, inline: true },
+            { name: "Status", value: "Unclaimed", inline: true }
+        )
+        .setTimestamp();
+
+    const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("ticket_claim").setLabel("Claim").setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId("ticket_close").setLabel("Close").setStyle(ButtonStyle.Danger)
+    );
+
+    await channel.send({
+        content: `<@${interaction.user.id}> <@&${supportRoleId}>`,
+        embeds: [embed],
+        components: [buttons]
+    });
+
+    await interaction.editReply({ content: `Ticket created: <#${channel.id}>` });
+}
+
+async function closeTicket(interaction) {
+    const channel = interaction.channel;
+    const ticket = ticketData.open[channel.id];
+
+    if (!ticket) {
+        return interaction.editReply({ content: "This isn't a ticket channel." });
+    }
+
+    await interaction.editReply({ content: "Saving the transcript, then this channel will be deleted." });
+
+    let transcript;
+
+    try {
+        transcript = await buildTranscript(channel, {
+            number: ticket.number,
+            openerTag: ticket.openerTag,
+            closerTag: interaction.user.tag
+        });
+    } catch (error) {
+        console.error("Transcript failed:", error.message);
+        transcript = { html: "<html><body>Transcript failed.</body></html>", count: 0 };
+    }
+
+    const logChannel = interaction.guild.channels.cache.get(ticketData.config.logChannelId);
+
+    if (logChannel) {
+        const file = new AttachmentBuilder(
+            Buffer.from(transcript.html, "utf8"),
+            { name: `ticket-${ticket.number}.html` }
+        );
+
+        const logEmbed = new EmbedBuilder()
+            .setTitle("Ticket Closed")
+            .addFields(
+                { name: "Ticket", value: `#${ticket.number}`, inline: true },
+                { name: "Game", value: GAMES[ticket.game] || ticket.game || "Unknown", inline: true },
+                { name: "Opened by", value: `<@${ticket.openerId}>`, inline: true },
+                { name: "Closed by", value: `<@${interaction.user.id}>`, inline: true },
+                { name: "Claimed by", value: ticket.claimedBy ? `<@${ticket.claimedBy}>` : "Nobody", inline: true },
+                { name: "Messages", value: String(transcript.count), inline: true },
+                { name: "Opened at", value: `<t:${Math.floor(ticket.createdAt / 1000)}:f>`, inline: true }
+            )
+            .setFooter({ text: "Download the attached file and open it to read the full transcript." })
+            .setTimestamp();
+
+        try {
+            await logChannel.send({ embeds: [logEmbed], files: [file] });
+        } catch (error) {
+            console.error("Could not post transcript:", error.message);
+        }
+    } else {
+        console.error("Log channel not found - transcript not saved.");
+    }
+
+    delete ticketData.open[channel.id];
+    saveTickets();
+
+    setTimeout(() => {
+        channel.delete().catch(err => console.error("Could not delete channel:", err.message));
+    }, 5000);
+}
+
+async function claimTicket(interaction) {
+    const ticket = ticketData.open[interaction.channel.id];
+
+    if (!ticket) {
+        return interaction.reply({ content: "This isn't a ticket channel.", flags: MessageFlags.Ephemeral });
+    }
+
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages)
+        && !interaction.member.roles.cache.has(ticket.supportRoleId || ticketData.config.supportRoleId)) {
+        return interaction.reply({ content: "Only support staff can claim tickets.", flags: MessageFlags.Ephemeral });
+    }
+
+    if (ticket.claimedBy) {
+        return interaction.reply({
+            content: `Already claimed by <@${ticket.claimedBy}>.`,
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    ticket.claimedBy = interaction.user.id;
+    saveTickets();
+
+    await interaction.reply({ content: `<@${interaction.user.id}> has claimed this ticket.` });
+}
+
+// ================================
+// INTERACTIONS
 // ================================
 
 client.on("interactionCreate", async interaction => {
+
+    // ---------- buttons ----------
+    if (interaction.isButton()) {
+        try {
+            if (interaction.customId.startsWith("ticket_create")) {
+                // Older panels have no game suffix - treat those as "ow".
+                const game = interaction.customId.split("_")[2] || "ow";
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+                return createTicket(interaction, game);
+            }
+
+            if (interaction.customId === "ticket_close") {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+                return closeTicket(interaction);
+            }
+
+            if (interaction.customId === "ticket_claim") {
+                return claimTicket(interaction);
+            }
+        } catch (error) {
+            console.error("Button error:", error);
+        }
+        return;
+    }
+
     if (!interaction.isChatInputCommand()) return;
 
     // ---------- /reactionrole-list ----------
     if (interaction.commandName === "reactionrole-list") {
         if (reactionRoles.size === 0) {
-            return interaction.reply({
-                content: "No reaction roles saved yet.",
-                flags: MessageFlags.Ephemeral
-            });
+            return interaction.reply({ content: "No reaction roles saved yet.", flags: MessageFlags.Ephemeral });
         }
 
         const lines = [...reactionRoles.entries()].map(([key, roleId]) => {
@@ -265,10 +600,77 @@ client.on("interactionCreate", async interaction => {
             return `Message \`${messageId}\` - ${emojiKey} -> <@&${roleId}>`;
         });
 
+        return interaction.reply({ content: lines.join("\n").slice(0, 1900), flags: MessageFlags.Ephemeral });
+    }
+
+    // ---------- /ticket-setup ----------
+    if (interaction.commandName === "ticket-setup") {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+            return interaction.reply({ content: "You need **Manage Server** to do this.", flags: MessageFlags.Ephemeral });
+        }
+
+        ticketData.config = {
+            supportRoleId: interaction.options.getRole("support_role").id,
+            logChannelId: interaction.options.getChannel("log_channel").id,
+            categoryId: interaction.options.getChannel("category")?.id || null
+        };
+
+        saveTickets();
+
         return interaction.reply({
-            content: lines.join("\n").slice(0, 1900),
+            content: "Ticket system configured. Now run **/ticket-panel** in the channel where customers should open tickets.",
             flags: MessageFlags.Ephemeral
         });
+    }
+
+    // ---------- /ticket-panel ----------
+    if (interaction.commandName === "ticket-panel") {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+            return interaction.reply({ content: "You need **Manage Server** to do this.", flags: MessageFlags.Ephemeral });
+        }
+
+        if (!ticketData.config.supportRoleId) {
+            return interaction.reply({ content: "Run /ticket-setup first.", flags: MessageFlags.Ephemeral });
+        }
+
+        const game = interaction.options.getString("game");
+        const gameName = GAMES[game] || game;
+
+        ticketData.panels[game] = {
+            categoryId: interaction.options.getChannel("category")?.id || null,
+            supportRoleId: interaction.options.getRole("support_role")?.id || null
+        };
+
+        saveTickets();
+
+        const embed = new EmbedBuilder()
+            .setTitle(interaction.options.getString("title") || `${gameName} Support`)
+            .setDescription(
+                interaction.options.getString("description") ||
+                `Need help with ${gameName}? Click the button below to open a private ticket with our staff.`
+            )
+            .setTimestamp();
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`ticket_create_${game}`)
+                .setLabel("Create Ticket")
+                .setEmoji("📩")
+                .setStyle(ButtonStyle.Success)
+        );
+
+        await interaction.channel.send({ embeds: [embed], components: [row] });
+
+        return interaction.reply({
+            content: `${gameName} panel posted. Tickets will be named \`ticket-${game}-username\`.`,
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
+    // ---------- /ticket-close ----------
+    if (interaction.commandName === "ticket-close") {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        return closeTicket(interaction);
     }
 
     // ---------- /reactionrole ----------
@@ -277,23 +679,17 @@ client.on("interactionCreate", async interaction => {
     try {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     } catch (error) {
-        console.error("Could not defer reply:", error.message);
         return;
     }
 
     if (!interaction.guild) {
-        return interaction.editReply({
-            content: "This command only works inside a server."
-        });
+        return interaction.editReply({ content: "This command only works inside a server." });
     }
 
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageRoles)) {
-        return interaction.editReply({
-            content: "You need **Manage Roles** permission to use this command."
-        });
+        return interaction.editReply({ content: "You need **Manage Roles** permission to use this command." });
     }
 
-    // ---------- collect the emoji/role pairs ----------
     const pairs = [];
 
     for (let i = 1; i <= MAX_PAIRS; i++) {
@@ -305,65 +701,47 @@ client.on("interactionCreate", async interaction => {
             pairs.push({ emoji: emoji.trim(), role });
         } else if (emoji || role) {
             return interaction.editReply({
-                content: `Pair ${i} is incomplete - you need both \`emoji${suffix}\` and \`role${suffix}\` filled in.`
+                content: `Pair ${i} is incomplete - you need both \`emoji${suffix}\` and \`role${suffix}\`.`
             });
         }
     }
 
-    // ---------- reject duplicate emoji ----------
     const seen = new Set();
 
     for (const pair of pairs) {
         const key = keyFromInput(pair.emoji);
-
         if (seen.has(key)) {
-            return interaction.editReply({
-                content: `You used ${pair.emoji} more than once. Each emoji can only map to one role.`
-            });
+            return interaction.editReply({ content: `You used ${pair.emoji} more than once.` });
         }
-
         seen.add(key);
     }
 
-    // ---------- check the bot can actually assign these roles ----------
     let me;
 
     try {
         me = await interaction.guild.members.fetchMe();
     } catch (error) {
-        console.error("Could not fetch my own member object:", error.message);
-        return interaction.editReply({
-            content: "I couldn't check my own permissions. Try re-inviting me with the bot scope."
-        });
+        return interaction.editReply({ content: "I couldn't check my own permissions." });
     }
 
     for (const pair of pairs) {
         if (pair.role.position >= me.roles.highest.position) {
             return interaction.editReply({
-                content: `I can't assign **${pair.role.name}** because it sits above my own role. Go to Server Settings > Roles and drag **${me.roles.highest.name}** above it.`
+                content: `I can't assign **${pair.role.name}** - it sits above my own role. Drag **${me.roles.highest.name}** above it in Server Settings > Roles.`
             });
         }
 
         if (pair.role.managed) {
-            return interaction.editReply({
-                content: `**${pair.role.name}** is managed by an integration and can't be assigned manually.`
-            });
+            return interaction.editReply({ content: `**${pair.role.name}** is managed by an integration.` });
         }
     }
 
-    // ---------- build and send the message ----------
-    const title = interaction.options.getString("title") || "Reaction Roles";
-    const description =
-        interaction.options.getString("description") ||
-        "React below to receive your role.";
-
-    const roleLines = pairs
-        .map(pair => `${pair.emoji} - ${pair.role}`)
-        .join("\n");
-
     const embed = new EmbedBuilder()
-        .setTitle(title)
-        .setDescription(`${description}\n\n${roleLines}`)
+        .setTitle(interaction.options.getString("title") || "Reaction Roles")
+        .setDescription(
+            `${interaction.options.getString("description") || "React below to receive your role."}\n\n` +
+            pairs.map(p => `${p.emoji} - ${p.role}`).join("\n")
+        )
         .setTimestamp();
 
     let message;
@@ -371,52 +749,34 @@ client.on("interactionCreate", async interaction => {
     try {
         message = await interaction.channel.send({ embeds: [embed] });
     } catch (error) {
-        return interaction.editReply({
-            content: "I couldn't post the message. Do I have permission to send messages and embeds in this channel?"
-        });
+        return interaction.editReply({ content: "I couldn't post the message in this channel." });
     }
 
-    // ---------- add the reactions ----------
     for (const pair of pairs) {
         try {
             await message.react(pair.emoji);
         } catch (error) {
             await message.delete().catch(() => {});
-            return interaction.editReply({
-                content: `I couldn't react with ${pair.emoji}. Use a standard emoji, or a custom emoji from a server I'm in.`
-            });
+            return interaction.editReply({ content: `I couldn't react with ${pair.emoji}.` });
         }
     }
 
-    // ---------- save ----------
     for (const pair of pairs) {
-        reactionRoles.set(
-            makeKey(message.id, keyFromInput(pair.emoji)),
-            pair.role.id
-        );
+        reactionRoles.set(makeKey(message.id, keyFromInput(pair.emoji)), pair.role.id);
     }
 
-    saveData();
+    saveRoles();
 
     await interaction.editReply({
-        content: `Reaction role message created with ${pairs.length} role${pairs.length === 1 ? "" : "s"}. Saved - it will survive restarts.`
+        content: `Reaction role message created with ${pairs.length} role${pairs.length === 1 ? "" : "s"}.`
     });
 });
 
 // ================================
-// ERROR SAFETY NET
+// SAFETY NET
 // ================================
 
-client.on("error", error => {
-    console.error("Client error:", error);
-});
-
-process.on("unhandledRejection", error => {
-    console.error("Unhandled rejection:", error);
-});
-
-// ================================
-// LOGIN
-// ================================
+client.on("error", error => console.error("Client error:", error));
+process.on("unhandledRejection", error => console.error("Unhandled rejection:", error));
 
 client.login(TOKEN);
