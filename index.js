@@ -500,8 +500,7 @@ async function createTicket(interaction, game) {
         supportRoleId,
         openerId: interaction.user.id,
         openerTag: interaction.user.tag,
-        createdAt: Date.now(),
-        claimedBy: null
+        createdAt: Date.now()
     };
 
     saveTickets();
@@ -511,13 +510,11 @@ async function createTicket(interaction, game) {
         .setDescription("Support will be with you shortly. Describe your issue below with as much detail as you can.")
         .addFields(
             { name: "Opened by", value: `<@${interaction.user.id}>`, inline: true },
-            { name: "Game", value: GAMES[game] || game, inline: true },
-            { name: "Status", value: "Unclaimed", inline: true }
+            { name: "Game", value: GAMES[game] || game, inline: true }
         )
         .setTimestamp();
 
     const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId("ticket_claim").setLabel("Claim").setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId("ticket_close").setLabel("Close").setStyle(ButtonStyle.Danger)
     );
 
@@ -581,7 +578,6 @@ async function closeTicket(interaction) {
                 { name: "Game", value: GAMES[ticket.game] || ticket.game || "Unknown", inline: true },
                 { name: "Opened by", value: `<@${ticket.openerId}>`, inline: true },
                 { name: "Closed by", value: `<@${interaction.user.id}>`, inline: true },
-                { name: "Claimed by", value: ticket.claimedBy ? `<@${ticket.claimedBy}>` : "Nobody", inline: true },
                 { name: "Messages", value: String(transcript.count), inline: true },
                 { name: "Opened at", value: `<t:${Math.floor(ticket.createdAt / 1000)}:f>`, inline: true }
             )
@@ -603,31 +599,6 @@ async function closeTicket(interaction) {
     setTimeout(() => {
         channel.delete().catch(err => console.error("Could not delete channel:", err.message));
     }, 5000);
-}
-
-async function claimTicket(interaction) {
-    const ticket = ticketData.open[interaction.channel.id];
-
-    if (!ticket) {
-        return interaction.reply({ content: "This isn't a ticket channel.", flags: MessageFlags.Ephemeral });
-    }
-
-    if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages)
-        && !interaction.member.roles.cache.has(ticket.supportRoleId || ticketData.config.supportRoleId)) {
-        return interaction.reply({ content: "Only support staff can claim tickets.", flags: MessageFlags.Ephemeral });
-    }
-
-    if (ticket.claimedBy) {
-        return interaction.reply({
-            content: `Already claimed by <@${ticket.claimedBy}>.`,
-            flags: MessageFlags.Ephemeral
-        });
-    }
-
-    ticket.claimedBy = interaction.user.id;
-    saveTickets();
-
-    await interaction.reply({ content: `<@${interaction.user.id}> has claimed this ticket.` });
 }
 
 // ================================
@@ -662,9 +633,6 @@ client.on("interactionCreate", async interaction => {
                 return closeTicket(interaction);
             }
 
-            if (interaction.customId === "ticket_claim") {
-                return claimTicket(interaction);
-            }
         } catch (error) {
             console.error("Button error:", error);
         }
