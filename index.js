@@ -504,6 +504,19 @@ async function closeTicket(interaction) {
         return interaction.editReply({ content: "This isn't a ticket channel." });
     }
 
+    // Only staff (or admins) may close.
+    const staffRoleId = ticket.supportRoleId || ticketData.config.supportRoleId;
+
+    const isStaff =
+        interaction.member.roles.cache.has(staffRoleId) ||
+        interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
+
+    if (!isStaff) {
+        return interaction.editReply({
+            content: "Only staff can close tickets. If you're finished, just say so and a staff member will close it for you."
+        });
+    }
+
     await interaction.editReply({ content: "Saving the transcript, then this channel will be deleted." });
 
     let transcript;
