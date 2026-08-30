@@ -507,7 +507,6 @@ async function createTicket(interaction, game) {
 
     const embed = new EmbedBuilder()
         .setTitle(`${GAMES[game] || game} Ticket #${number}`)
-        .setDescription("Support will be with you shortly. Describe your issue below with as much detail as you can.")
         .addFields(
             { name: "Opened by", value: `<@${interaction.user.id}>`, inline: true },
             { name: "Game", value: GAMES[game] || game, inline: true }
