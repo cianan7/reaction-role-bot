@@ -235,6 +235,10 @@ client.once("clientReady", async () => {
             .addStringOption(o => o.setName("description").setDescription("Panel text above the dropdown").setRequired(false)),
 
         new SlashCommandBuilder()
+            .setName("ticket-debug")
+            .setDescription("Show what permissions I actually have and where tickets would go"),
+
+        new SlashCommandBuilder()
             .setName("ticket-close")
             .setDescription("Close the ticket you are currently in")
     ].map(c => c.toJSON());
@@ -648,6 +652,10 @@ client.on("interactionCreate", async interaction => {
             categoryId: interaction.options.getChannel("category")?.id || null
         };
 
+        // Running setup again wipes any per-game overrides so everything
+        // falls back to the category above.
+        ticketData.panels = {};
+
         saveTickets();
 
         return interaction.reply({
@@ -783,6 +791,62 @@ client.on("interactionCreate", async interaction => {
         });
 
         return interaction.reply({ content: "Dropdown panel posted.", flags: MessageFlags.Ephemeral });
+    }
+
+    // ---------- /ticket-debug ----------
+    if (interaction.commandName === "ticket-debug") {
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+        const me = await interaction.guild.members.fetchMe();
+        const yes = v => (v ? "YES" : "NO");
+
+        const lines = [];
+
+        lines.push(`**My highest role:** ${me.roles.highest.name} (position ${me.roles.highest.position})`);
+        lines.push("");
+        lines.push("**Server-wide permissions**");
+        lines.push(`Administrator: ${yes(me.permissions.has(PermissionFlagsBits.Administrator))}`);
+        lines.push(`Manage Channels: ${yes(me.permissions.has(PermissionFlagsBits.ManageChannels))}`);
+        lines.push(`Manage Roles: ${yes(me.permissions.has(PermissionFlagsBits.ManageRoles))}`);
+        lines.push(`View Channels: ${yes(me.permissions.has(PermissionFlagsBits.ViewChannel))}`);
+        lines.push(`Send Messages: ${yes(me.permissions.has(PermissionFlagsBits.SendMessages))}`);
+        lines.push("");
+
+        const categoryId = ticketData.config.categoryId;
+
+        if (!categoryId) {
+            lines.push("**Target category:** none set - tickets go to the top level of the server.");
+        } else {
+            const category = interaction.guild.channels.cache.get(categoryId);
+
+            if (!category) {
+                lines.push(`**Target category:** ID ${categoryId} - I CANNOT SEE THIS CHANNEL. It may have been deleted, or it is in another server.`);
+            } else {
+                const here = category.permissionsFor(me);
+                lines.push(`**Target category:** ${category.name}`);
+                lines.push(`Channels inside: ${category.children.cache.size} of 50`);
+                lines.push(`View Channel here: ${yes(here.has(PermissionFlagsBits.ViewChannel))}`);
+                lines.push(`Manage Channels here: ${yes(here.has(PermissionFlagsBits.ManageChannels))}`);
+                lines.push(`Manage Roles here: ${yes(here.has(PermissionFlagsBits.ManageRoles))}`);
+            }
+        }
+
+        lines.push("");
+
+        const supportRoleId = ticketData.config.supportRoleId;
+        const supportRole = supportRoleId ? interaction.guild.roles.cache.get(supportRoleId) : null;
+
+        lines.push(`**Support role:** ${supportRole ? supportRole.name : "NOT SET or deleted"}`);
+
+        const logChannel = ticketData.config.logChannelId
+            ? interaction.guild.channels.cache.get(ticketData.config.logChannelId)
+            : null;
+
+        lines.push(`**Log channel:** ${logChannel ? `#${logChannel.name}` : "NOT SET or I can't see it"}`);
+        lines.push(`**Per-game overrides:** ${Object.keys(ticketData.panels).length ? JSON.stringify(ticketData.panels) : "none"}`);
+        lines.push(`**Data folder:** ${DATA_DIR}`);
+
+        return interaction.editReply({ content: lines.join("\n").slice(0, 1900) });
     }
 
     // ---------- /ticket-close ----------
