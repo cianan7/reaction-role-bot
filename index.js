@@ -25,6 +25,9 @@ const GUILD_ID = process.env.GUILD_ID;
 
 const MAX_PAIRS = 5;
 
+// Filled in on startup, reused when the bot joins a new server.
+let cachedCommands = [];
+
 console.log("TOKEN:", TOKEN ? `found, ${TOKEN.length} chars` : "MISSING");
 console.log("CLIENT_ID:", CLIENT_ID ? `found, ${CLIENT_ID}` : "MISSING");
 console.log("GUILD_ID:", GUILD_ID ? `found, ${GUILD_ID}` : "not set (using global commands)");
@@ -242,18 +245,40 @@ client.once("clientReady", async () => {
             .setDescription("Close the ticket you are currently in")
     ].map(c => c.toJSON());
 
+    cachedCommands = commands;
+
     const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-    try {
-        if (GUILD_ID) {
-            await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
-            console.log("Slash commands registered for your server (instant).");
-        } else {
-            await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-            console.log("Slash commands registered globally (up to 1 hour).");
+    // Register in every server the bot is in. Guild commands appear
+    // instantly, unlike global ones which take up to an hour.
+    for (const guild of client.guilds.cache.values()) {
+        try {
+            await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guild.id), { body: commands });
+            console.log(`Commands registered in: ${guild.name}`);
+        } catch (error) {
+            console.error(`Failed to register in ${guild.name}:`, error.message);
         }
+    }
+
+    // Wipe old global commands so stale versions stop showing up.
+    try {
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+        console.log("Cleared old global commands.");
     } catch (error) {
-        console.error("Failed to register slash commands:", error);
+        console.error("Could not clear global commands:", error.message);
+    }
+});
+
+// Register commands automatically when added to a new server.
+client.on("guildCreate", async guild => {
+    console.log(`Added to new server: ${guild.name} - registering commands.`);
+
+    try {
+        const rest = new REST({ version: "10" }).setToken(TOKEN);
+        await rest.put(Routes.applicationGuildCommands(CLIENT_ID, guild.id), { body: cachedCommands });
+        console.log(`Commands registered in: ${guild.name}`);
+    } catch (error) {
+        console.error(`Failed to register in ${guild.name}:`, error.message);
     }
 });
 
