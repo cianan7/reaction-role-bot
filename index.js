@@ -411,7 +411,11 @@ async function createTicket(interaction, game) {
     const overwrites = [
         {
             id: interaction.guild.roles.everyone.id,
-            deny: [PermissionFlagsBits.ViewChannel]
+            deny: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory
+            ]
         },
         {
             id: interaction.user.id,
@@ -445,19 +449,49 @@ async function createTicket(interaction, game) {
 
     let channel;
 
+    // Create with no parent first. A locked-down category can block
+    // creation outright, so we make the channel free-standing, apply the
+    // permissions, then move it into place.
     try {
         channel = await interaction.guild.channels.create({
             name: channelName,
             type: ChannelType.GuildText,
-            parent: categoryId,
             permissionOverwrites: overwrites
         });
     } catch (error) {
         console.error("Could not create ticket channel:", error.message);
         ticketData.counter -= 1;
         return interaction.editReply({
-            content: "I couldn't create the channel. I need **Manage Channels** permission, and the category must not be full (50 channel limit)."
+            content: "I couldn't create the channel. I need **Manage Channels** and **Manage Roles** at server level."
         });
+    }
+
+    // Now move it into the category, keeping our own permissions.
+    if (categoryId) {
+        try {
+            await channel.setParent(categoryId, { lockPermissions: false });
+        } catch (error) {
+            console.error("Could not move ticket into category:", error.message);
+        }
+    }
+
+    // Belt and braces: re-apply the deny after creation in case the
+    // category's own permissions bled through on create.
+    try {
+        await channel.permissionOverwrites.edit(interaction.guild.roles.everyone.id, {
+            ViewChannel: false,
+            SendMessages: false,
+            ReadMessageHistory: false
+        });
+
+        await channel.permissionOverwrites.edit(interaction.user.id, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true,
+            AttachFiles: true
+        });
+    } catch (error) {
+        console.error("Could not re-apply ticket permissions:", error.message);
     }
 
     ticketData.open[channel.id] = {
