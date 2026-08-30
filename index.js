@@ -92,6 +92,7 @@ if (!ticketData.config) ticketData.config = {};
 if (!ticketData.panels) ticketData.panels = {};
 if (!ticketData.counter) ticketData.counter = 0;
 if (!ticketData.open) ticketData.open = {};
+if (!ticketData.closed) ticketData.closed = {};
 
 // Friendly names for the game codes used in channel names.
 const GAMES = {
@@ -235,6 +236,32 @@ client.once("clientReady", async () => {
                     .setRequired(false))
             .addStringOption(o => o.setName("title").setDescription("Panel title").setRequired(false))
             .addStringOption(o => o.setName("description").setDescription("Panel text above the dropdown").setRequired(false)),
+
+        new SlashCommandBuilder()
+            .setName("applications")
+            .setDescription("Open or close applications for a game")
+            .addStringOption(o =>
+                o.setName("game")
+                    .setDescription("Which game")
+                    .setRequired(true)
+                    .addChoices(
+                        { name: "Overwatch", value: "ow" },
+                        { name: "League of Legends", value: "lol" },
+                        { name: "World of Warcraft", value: "wow" },
+                        { name: "All games", value: "all" }
+                    ))
+            .addStringOption(o =>
+                o.setName("status")
+                    .setDescription("Open or closed")
+                    .setRequired(true)
+                    .addChoices(
+                        { name: "Open", value: "open" },
+                        { name: "Closed", value: "closed" }
+                    ))
+            .addStringOption(o =>
+                o.setName("reason")
+                    .setDescription("Message shown to people who try while closed")
+                    .setRequired(false)),
 
         new SlashCommandBuilder()
             .setName("ticket-debug")
@@ -401,6 +428,16 @@ ${rows || "<div class='msg'><div class='body'>No messages.</div></div>"}
 async function createTicket(interaction, game) {
     const config = ticketData.config;
     const panel = ticketData.panels[game] || {};
+
+    // Applications closed for this game?
+    const closure = ticketData.closed[game];
+
+    if (closure) {
+        return interaction.editReply({
+            content: closure.reason ||
+                `**${GAMES[game] || game}** applications are currently closed. Check back later.`
+        });
+    }
 
     const supportRoleId = panel.supportRoleId || config.supportRoleId;
     const categoryId = panel.categoryId || config.categoryId || null;
@@ -831,6 +868,38 @@ client.on("interactionCreate", async interaction => {
         return interaction.reply({ content: "Dropdown panel posted.", flags: MessageFlags.Ephemeral });
     }
 
+    // ---------- /applications ----------
+    if (interaction.commandName === "applications") {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+            return interaction.reply({ content: "You need **Manage Server** to do this.", flags: MessageFlags.Ephemeral });
+        }
+
+        const game = interaction.options.getString("game");
+        const status = interaction.options.getString("status");
+        const reason = interaction.options.getString("reason");
+
+        const targets = game === "all" ? Object.keys(GAMES) : [game];
+
+        for (const g of targets) {
+            if (status === "closed") {
+                ticketData.closed[g] = { reason: reason || null, since: Date.now() };
+            } else {
+                delete ticketData.closed[g];
+            }
+        }
+
+        saveTickets();
+
+        const names = targets.map(g => GAMES[g] || g).join(", ");
+
+        return interaction.reply({
+            content: status === "closed"
+                ? `Applications **closed** for: ${names}.${reason ? `\nUsers will see: "${reason}"` : ""}`
+                : `Applications **open** for: ${names}.`,
+            flags: MessageFlags.Ephemeral
+        });
+    }
+
     // ---------- /ticket-debug ----------
     if (interaction.commandName === "ticket-debug") {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
@@ -882,6 +951,10 @@ client.on("interactionCreate", async interaction => {
 
         lines.push(`**Log channel:** ${logChannel ? `#${logChannel.name}` : "NOT SET or I can't see it"}`);
         lines.push(`**Per-game overrides:** ${Object.keys(ticketData.panels).length ? JSON.stringify(ticketData.panels) : "none"}`);
+
+        const closedGames = Object.keys(ticketData.closed);
+        lines.push(`**Applications closed for:** ${closedGames.length ? closedGames.map(g => GAMES[g] || g).join(", ") : "nothing - all open"}`);
+
         lines.push(`**Data folder:** ${DATA_DIR}`);
 
         return interaction.editReply({ content: lines.join("\n").slice(0, 1900) });
