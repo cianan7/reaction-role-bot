@@ -10,6 +10,7 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
+    StringSelectMenuBuilder,
     AttachmentBuilder,
     ChannelType,
     MessageFlags,
@@ -211,6 +212,27 @@ client.once("clientReady", async () => {
                     .setRequired(false))
             .addStringOption(o => o.setName("title").setDescription("Panel title").setRequired(false))
             .addStringOption(o => o.setName("description").setDescription("Panel text").setRequired(false)),
+
+        new SlashCommandBuilder()
+            .setName("ticket-menu")
+            .setDescription("Post one panel with a game dropdown (for #apply)")
+            .addChannelOption(o =>
+                o.setName("wow_category")
+                    .setDescription("Category for PS WOW tickets")
+                    .addChannelTypes(ChannelType.GuildCategory)
+                    .setRequired(false))
+            .addChannelOption(o =>
+                o.setName("ow_category")
+                    .setDescription("Category for PS OW tickets")
+                    .addChannelTypes(ChannelType.GuildCategory)
+                    .setRequired(false))
+            .addChannelOption(o =>
+                o.setName("lol_category")
+                    .setDescription("Category for PS LOL tickets")
+                    .addChannelTypes(ChannelType.GuildCategory)
+                    .setRequired(false))
+            .addStringOption(o => o.setName("title").setDescription("Panel title").setRequired(false))
+            .addStringOption(o => o.setName("description").setDescription("Panel text above the dropdown").setRequired(false)),
 
         new SlashCommandBuilder()
             .setName("ticket-close")
@@ -563,6 +585,17 @@ async function claimTicket(interaction) {
 
 client.on("interactionCreate", async interaction => {
 
+    // ---------- game dropdown ----------
+    if (interaction.isStringSelectMenu() && interaction.customId === "ticket_menu") {
+        try {
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+            return createTicket(interaction, interaction.values[0]);
+        } catch (error) {
+            console.error("Menu error:", error);
+            return;
+        }
+    }
+
     // ---------- buttons ----------
     if (interaction.isButton()) {
         try {
@@ -665,6 +698,61 @@ client.on("interactionCreate", async interaction => {
             content: `${gameName} panel posted. Tickets will be named \`ticket-${game}-username\`.`,
             flags: MessageFlags.Ephemeral
         });
+    }
+
+    // ---------- /ticket-menu ----------
+    if (interaction.commandName === "ticket-menu") {
+        if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+            return interaction.reply({ content: "You need **Manage Server** to do this.", flags: MessageFlags.Ephemeral });
+        }
+
+        if (!ticketData.config.supportRoleId) {
+            return interaction.reply({ content: "Run /ticket-setup first.", flags: MessageFlags.Ephemeral });
+        }
+
+        const categories = {
+            wow: interaction.options.getChannel("wow_category")?.id || null,
+            ow: interaction.options.getChannel("ow_category")?.id || null,
+            lol: interaction.options.getChannel("lol_category")?.id || null
+        };
+
+        for (const [game, categoryId] of Object.entries(categories)) {
+            ticketData.panels[game] = {
+                categoryId: categoryId || ticketData.panels[game]?.categoryId || null,
+                supportRoleId: ticketData.panels[game]?.supportRoleId || null
+            };
+        }
+
+        saveTickets();
+
+        const embed = new EmbedBuilder()
+            .setTitle(interaction.options.getString("title") || "Apply to Project Sylvanas")
+            .setDescription(
+                interaction.options.getString("description") ||
+                "Pick the game you're applying for from the dropdown below. " +
+                "A private channel will open where only you and our staff can talk.\n\n" +
+                "**PS WOW** - World of Warcraft\n" +
+                "**PS OW** - Overwatch\n" +
+                "**PS LOL** - League of Legends\n\n" +
+                "You can have one open ticket per game. Please have your details ready before applying."
+            )
+            .setTimestamp();
+
+        const menu = new StringSelectMenuBuilder()
+            .setCustomId("ticket_menu")
+            .setPlaceholder("Choose a game...")
+            .addOptions(
+                { label: "PS WOW", description: "Apply for World of Warcraft", value: "wow", emoji: "⚔️" },
+                { label: "PS OW", description: "Apply for Overwatch", value: "ow", emoji: "🎯" },
+                { label: "PS LOL", description: "Apply for League of Legends", value: "lol", emoji: "🔮" }
+            );
+
+        await interaction.channel.send({
+            embeds: [embed],
+            components: [new ActionRowBuilder().addComponents(menu)]
+        });
+
+        return interaction.reply({ content: "Dropdown panel posted.", flags: MessageFlags.Ephemeral });
     }
 
     // ---------- /ticket-close ----------
