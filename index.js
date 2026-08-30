@@ -725,26 +725,56 @@ client.on("interactionCreate", async interaction => {
 
         saveTickets();
 
+        function emojiText(name, fallback) {
+            const found = interaction.guild.emojis.cache.find(
+                e => e.name.toLowerCase() === name.toLowerCase()
+            );
+            return found ? found.toString() : fallback;
+        }
+
         const embed = new EmbedBuilder()
             .setTitle(interaction.options.getString("title") || "Apply to Project Sylvanas")
             .setDescription(
                 interaction.options.getString("description") ||
                 "Pick the game you're applying for from the dropdown below. " +
                 "A private channel will open where only you and our staff can talk.\n\n" +
-                "**PS WOW** - World of Warcraft\n" +
-                "**PS OW** - Overwatch\n" +
-                "**PS LOL** - League of Legends\n\n" +
+                `${emojiText("PSWOW", "⚔️")} **PS WOW** - World of Warcraft\n` +
+                `${emojiText("PSOW", "🎯")} **PS OW** - Overwatch\n` +
+                `${emojiText("PSLOL", "🔮")} **PS LOL** - League of Legends\n\n` +
                 "You can have one open ticket per game. Please have your details ready before applying."
             )
             .setTimestamp();
+
+        // Look up your server emoji by name, fall back to a standard emoji.
+        function findEmoji(name, fallback) {
+            const found = interaction.guild.emojis.cache.find(
+                e => e.name.toLowerCase() === name.toLowerCase()
+            );
+            return found ? { id: found.id, name: found.name, animated: found.animated } : fallback;
+        }
 
         const menu = new StringSelectMenuBuilder()
             .setCustomId("ticket_menu")
             .setPlaceholder("Choose a game...")
             .addOptions(
-                { label: "PS WOW", description: "Apply for World of Warcraft", value: "wow", emoji: "⚔️" },
-                { label: "PS OW", description: "Apply for Overwatch", value: "ow", emoji: "🎯" },
-                { label: "PS LOL", description: "Apply for League of Legends", value: "lol", emoji: "🔮" }
+                {
+                    label: "PS WOW",
+                    description: "Apply for World of Warcraft",
+                    value: "wow",
+                    emoji: findEmoji("PSWOW", "⚔️")
+                },
+                {
+                    label: "PS OW",
+                    description: "Apply for Overwatch",
+                    value: "ow",
+                    emoji: findEmoji("PSOW", "🎯")
+                },
+                {
+                    label: "PS LOL",
+                    description: "Apply for League of Legends",
+                    value: "lol",
+                    emoji: findEmoji("PSLOL", "🔮")
+                }
             );
 
         await interaction.channel.send({
