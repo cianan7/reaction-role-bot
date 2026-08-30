@@ -146,7 +146,6 @@ client.once("clientReady", async () => {
     console.log(`Logged in as ${client.user.tag}`);
 
     client.user.setPresence({
-        activities: [{ name: "Reaction Roles & Tickets", type: 0 }],
         status: "online"
     });
 
